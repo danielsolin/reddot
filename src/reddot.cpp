@@ -228,8 +228,8 @@ HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
    int cpuRed = PercentToRed(cpuPercent, bright);
    int gpuRed = PercentToRed(gpuPercent, bright);
 
-   DrawRedDot(mem, 8, 8, 24, 24, cpuRed);
-   DrawRedDot(mem, 12, 12, 20, 20, gpuRed);
+   DrawRedDot(mem, 3, 3, 29, 29, cpuRed);
+   DrawRedDot(mem, 9, 9, 23, 23, gpuRed);
 
    SelectObject(mem, old);
 

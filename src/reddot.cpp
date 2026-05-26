@@ -111,7 +111,7 @@ bool InitGpuCounter()
    return true;
 }
 
-int GetGpu1Percent()
+int GetGpuPercent()
 {
    if (!gpuQuery || !gpuCounter)
       return -1;
@@ -261,11 +261,11 @@ void UpdateTrayIcon(HWND hwnd)
    nid.hIcon = trayIcon;
 
    if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0)
-      swprintf_s(nid.szTip, L"CPU %d%%\nRAM %d%%\nGPU1 %d%%", cpuPercent, ramPercent, gpuPercent);
+      swprintf_s(nid.szTip, L"CPU %d%%\nGPU %d%%\nRAM %d%%", cpuPercent, gpuPercent, ramPercent);
    else if (cpuPercent >= 0 && ramPercent >= 0)
-      swprintf_s(nid.szTip, L"CPU %d%%\nRAM %d%%\nGPU1 ...", cpuPercent, ramPercent);
+      swprintf_s(nid.szTip, L"CPU %d%%\nGPU ...\nRAM %d%% ", cpuPercent, ramPercent);
    else
-      wcscpy_s(nid.szTip, L"CPU ...\nRAM ...\nGPU1 ...");
+      wcscpy_s(nid.szTip, L"CPU ...\nGPU ...\nRAM ...");
 
    Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
@@ -319,7 +319,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       ramPercent = GetRamPercent();
 
       if (gpuReady)
-         gpuPercent = GetGpu1Percent();
+         gpuPercent = GetGpuPercent();
 
       pulse = !pulse;
       UpdateTrayIcon(hwnd);

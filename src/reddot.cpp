@@ -70,7 +70,7 @@ int GetCpuPercent()
    return percent;
 }
 
-HICON CreateDotIcon(bool bright)
+HICON CreateDotIcon(int cpuPercent, bool bright)
 {
    const int size = 32;
 
@@ -87,7 +87,21 @@ HICON CreateDotIcon(bool bright)
    FillRect(mem, &rc, bg);
    DeleteObject(bg);
 
-   HBRUSH dot = CreateSolidBrush(bright ? RGB(255, 0, 0) : RGB(120, 0, 0));
+   int level = cpuPercent;
+
+   if (level < 0)
+      level = 0;
+
+   if (level > 100)
+      level = 100;
+
+   int red = 80 + (level * 175 / 100);
+
+   if (!bright)
+      red = red * 2 / 3;
+
+   HBRUSH dot = CreateSolidBrush(RGB(red, 0, 0));
+   
    HGDIOBJ oldBrush = SelectObject(mem, dot);
    Ellipse(mem, 10, 10, 22, 22);
    SelectObject(mem, oldBrush);
@@ -115,7 +129,7 @@ void UpdateTrayIcon(HWND hwnd)
    if (trayIcon)
       DestroyIcon(trayIcon);
 
-   trayIcon = CreateDotIcon(pulse);
+   trayIcon = CreateDotIcon(cpuPercent, pulse);
 
    nid.hIcon = trayIcon;
 
@@ -155,7 +169,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
    switch (msg)
    {
    case WM_CREATE:
-      trayIcon = CreateDotIcon(true);
+      trayIcon = CreateDotIcon(0, true);
 
       nid.cbSize = sizeof(nid);
       nid.hWnd = hwnd;

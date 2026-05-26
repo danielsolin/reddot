@@ -2,6 +2,7 @@
 #define _UNICODE
 #include <windows.h>
 #include <shellapi.h>
+#include <wchar.h>
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_EXIT 1001
@@ -10,6 +11,64 @@
 static NOTIFYICONDATA nid = {};
 static HICON trayIcon = nullptr;
 static bool pulse = false;
+
+static ULONGLONG prevIdle = 0;
+static ULONGLONG prevKernel = 0;
+static ULONGLONG prevUser = 0;
+static int cpuPercent = -1;
+
+ULONGLONG FileTimeToUInt64(const FILETIME& ft)
+{
+   ULARGE_INTEGER uli;
+   uli.LowPart = ft.dwLowDateTime;
+   uli.HighPart = ft.dwHighDateTime;
+   return uli.QuadPart;
+}
+
+int GetCpuPercent()
+{
+   FILETIME idleTime;
+   FILETIME kernelTime;
+   FILETIME userTime;
+
+   if (!GetSystemTimes(&idleTime, &kernelTime, &userTime))
+      return -1;
+
+   ULONGLONG idle = FileTimeToUInt64(idleTime);
+   ULONGLONG kernel = FileTimeToUInt64(kernelTime);
+   ULONGLONG user = FileTimeToUInt64(userTime);
+
+   if (prevIdle == 0 && prevKernel == 0 && prevUser == 0)
+   {
+      prevIdle = idle;
+      prevKernel = kernel;
+      prevUser = user;
+      return -1;
+   }
+
+   ULONGLONG idleDelta = idle - prevIdle;
+   ULONGLONG kernelDelta = kernel - prevKernel;
+   ULONGLONG userDelta = user - prevUser;
+
+   prevIdle = idle;
+   prevKernel = kernel;
+   prevUser = user;
+
+   ULONGLONG total = kernelDelta + userDelta;
+
+   if (total == 0)
+      return 0;
+
+   int percent = static_cast<int>((total - idleDelta) * 100 / total);
+
+   if (percent < 0)
+      return 0;
+
+   if (percent > 100)
+      return 100;
+
+   return percent;
+}
 
 HICON CreateDotIcon(bool bright)
 {
@@ -59,7 +118,11 @@ void UpdateTrayIcon(HWND hwnd)
    trayIcon = CreateDotIcon(pulse);
 
    nid.hIcon = trayIcon;
-   wcscpy_s(nid.szTip, L"Red Dot");
+
+   if (cpuPercent >= 0)
+      swprintf_s(nid.szTip, L"red dot\nCPU %d%%", cpuPercent);
+   else
+      wcscpy_s(nid.szTip, L"red dot\nCPU ...");
 
    Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
@@ -100,13 +163,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
       nid.uCallbackMessage = WM_TRAYICON;
       nid.hIcon = trayIcon;
-      wcscpy_s(nid.szTip, L"Red Dot");
+      wcscpy_s(nid.szTip, L"red dot\nCPU ...");
 
       Shell_NotifyIcon(NIM_ADD, &nid);
       SetTimer(hwnd, TIMER_ID, 1000, nullptr);
       return 0;
 
    case WM_TIMER:
+      cpuPercent = GetCpuPercent();
       pulse = !pulse;
       UpdateTrayIcon(hwnd);
       return 0;
@@ -149,7 +213,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
    HWND hwnd = CreateWindowEx(
       0,
       CLASS_NAME,
-      L"Red Dot",
+      L"red dot",
       0,
       0, 0, 0, 0,
       nullptr,

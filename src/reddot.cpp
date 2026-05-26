@@ -3,6 +3,9 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <wchar.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <stdio.h>
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_EXIT 1001
@@ -16,6 +19,12 @@ static ULONGLONG prevIdle = 0;
 static ULONGLONG prevKernel = 0;
 static ULONGLONG prevUser = 0;
 static int cpuPercent = -1;
+static int ramPercent = -1;
+
+static PDH_HQUERY gpuQuery = nullptr;
+static PDH_HCOUNTER gpuCounter = nullptr;
+static bool gpuReady = false;
+static int gpuPercent = -1;
 
 ULONGLONG FileTimeToUInt64(const FILETIME& ft)
 {
@@ -70,6 +79,120 @@ int GetCpuPercent()
    return percent;
 }
 
+int GetRamPercent()
+{
+   MEMORYSTATUSEX memory = {};
+   memory.dwLength = sizeof(memory);
+
+   if (!GlobalMemoryStatusEx(&memory))
+      return -1;
+
+   return static_cast<int>(memory.dwMemoryLoad);
+}
+
+bool InitGpuCounter()
+{
+   if (PdhOpenQuery(nullptr, 0, &gpuQuery) != ERROR_SUCCESS)
+      return false;
+
+   if (PdhAddEnglishCounterW(
+      gpuQuery,
+      L"\\GPU Engine(*)\\Utilization Percentage",
+      0,
+      &gpuCounter) != ERROR_SUCCESS)
+   {
+      PdhCloseQuery(gpuQuery);
+      gpuQuery = nullptr;
+      gpuCounter = nullptr;
+      return false;
+   }
+
+   PdhCollectQueryData(gpuQuery);
+   return true;
+}
+
+int GetGpu1Percent()
+{
+   if (!gpuQuery || !gpuCounter)
+      return -1;
+
+   if (PdhCollectQueryData(gpuQuery) != ERROR_SUCCESS)
+      return -1;
+
+   DWORD bufferSize = 0;
+   DWORD itemCount = 0;
+
+   PDH_STATUS status = PdhGetFormattedCounterArrayW(
+      gpuCounter,
+      PDH_FMT_DOUBLE,
+      &bufferSize,
+      &itemCount,
+      nullptr
+   );
+
+   if (status != PDH_MORE_DATA)
+      return -1;
+
+   auto items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(malloc(bufferSize));
+
+   if (!items)
+      return -1;
+
+   status = PdhGetFormattedCounterArrayW(
+      gpuCounter,
+      PDH_FMT_DOUBLE,
+      &bufferSize,
+      &itemCount,
+      items
+   );
+
+   if (status != ERROR_SUCCESS)
+   {
+      free(items);
+      return -1;
+   }
+
+   double maxValue = 0.0;
+
+   for (DWORD i = 0; i < itemCount; i++)
+   {
+      const wchar_t* name = items[i].szName;
+
+      if (!name)
+         continue;
+
+      bool is3d = wcsstr(name, L"engtype_3D") != nullptr;
+
+      if (is3d)
+      {
+         double value = items[i].FmtValue.doubleValue;
+
+         if (value > maxValue)
+            maxValue = value;
+      }
+   }
+
+   free(items);
+
+   if (maxValue < 0.0)
+      maxValue = 0.0;
+
+   if (maxValue > 100.0)
+      maxValue = 100.0;
+
+   return static_cast<int>(maxValue + 0.5);
+}
+
+void CleanupGpuCounter()
+{
+   if (gpuQuery)
+   {
+      PdhCloseQuery(gpuQuery);
+      gpuQuery = nullptr;
+      gpuCounter = nullptr;
+   }
+}
+
 HICON CreateDotIcon(int cpuPercent, bool bright)
 {
    const int size = 32;
@@ -87,6 +210,7 @@ HICON CreateDotIcon(int cpuPercent, bool bright)
    FillRect(mem, &rc, bg);
    DeleteObject(bg);
 
+	// Map CPU percent to a red color intensity
    int level = cpuPercent;
 
    if (level < 0)
@@ -95,10 +219,8 @@ HICON CreateDotIcon(int cpuPercent, bool bright)
    if (level > 100)
       level = 100;
 
-   int red = 80 + (level * 175 / 100);
-
-   if (!bright)
-      red = red * 2 / 3;
+   int baseRed = 80 + (level * 175 / 100);
+   int red = bright ? baseRed : 20 + (level * 60 / 100);
 
    HBRUSH dot = CreateSolidBrush(RGB(red, 0, 0));
    
@@ -129,14 +251,21 @@ void UpdateTrayIcon(HWND hwnd)
    if (trayIcon)
       DestroyIcon(trayIcon);
 
-   trayIcon = CreateDotIcon(cpuPercent, pulse);
+   int dotPercent = cpuPercent;
+
+   if (gpuPercent > dotPercent)
+      dotPercent = gpuPercent;
+
+   trayIcon = CreateDotIcon(dotPercent, pulse);
 
    nid.hIcon = trayIcon;
 
-   if (cpuPercent >= 0)
-      swprintf_s(nid.szTip, L"red dot\nCPU %d%%", cpuPercent);
+   if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0)
+      swprintf_s(nid.szTip, L"CPU %d%%\nRAM %d%%\nGPU1 %d%%", cpuPercent, ramPercent, gpuPercent);
+   else if (cpuPercent >= 0 && ramPercent >= 0)
+      swprintf_s(nid.szTip, L"CPU %d%%\nRAM %d%%\nGPU1 ...", cpuPercent, ramPercent);
    else
-      wcscpy_s(nid.szTip, L"red dot\nCPU ...");
+      wcscpy_s(nid.szTip, L"CPU ...\nRAM ...\nGPU1 ...");
 
    Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
@@ -177,14 +306,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
       nid.uCallbackMessage = WM_TRAYICON;
       nid.hIcon = trayIcon;
-      wcscpy_s(nid.szTip, L"red dot\nCPU ...");
+      wcscpy_s(nid.szTip, L"CPU ...");
 
       Shell_NotifyIcon(NIM_ADD, &nid);
       SetTimer(hwnd, TIMER_ID, 1000, nullptr);
+      gpuReady = InitGpuCounter();
+
       return 0;
 
    case WM_TIMER:
       cpuPercent = GetCpuPercent();
+      ramPercent = GetRamPercent();
+
+      if (gpuReady)
+         gpuPercent = GetGpu1Percent();
+
       pulse = !pulse;
       UpdateTrayIcon(hwnd);
       return 0;
@@ -206,6 +342,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
       if (trayIcon)
          DestroyIcon(trayIcon);
 
+      CleanupGpuCounter();
       PostQuitMessage(0);
       return 0;
    }

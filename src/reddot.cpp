@@ -156,20 +156,10 @@ int GetGpuPercent()
 
    for (DWORD i = 0; i < itemCount; i++)
    {
-      const wchar_t* name = items[i].szName;
+      double value = items[i].FmtValue.doubleValue;
 
-      if (!name)
-         continue;
-
-      bool is3d = wcsstr(name, L"engtype_3D") != nullptr;
-
-      if (is3d)
-      {
-         double value = items[i].FmtValue.doubleValue;
-
-         if (value > maxValue)
-            maxValue = value;
-      }
+      if (value > maxValue)
+         maxValue = value;
    }
 
    free(items);

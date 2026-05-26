@@ -183,7 +183,32 @@ void CleanupGpuCounter()
    }
 }
 
-HICON CreateDotIcon(int cpuPercent, bool bright)
+int PercentToRed(int percent, bool bright)
+{
+   int level = percent;
+
+   if (level < 0)
+      level = 0;
+
+   if (level > 100)
+      level = 100;
+
+   int baseRed = 80 + (level * 175 / 100);
+   return bright ? baseRed : 20 + (level * 60 / 100);
+}
+
+void DrawRedDot(HDC hdc, int left, int top, int right, int bottom, int red)
+{
+   HBRUSH brush = CreateSolidBrush(RGB(red, 0, 0));
+   HGDIOBJ oldBrush = SelectObject(hdc, brush);
+
+   Ellipse(hdc, left, top, right, bottom);
+
+   SelectObject(hdc, oldBrush);
+   DeleteObject(brush);
+}
+
+HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
 {
    const int size = 32;
 
@@ -200,24 +225,11 @@ HICON CreateDotIcon(int cpuPercent, bool bright)
    FillRect(mem, &rc, bg);
    DeleteObject(bg);
 
-	// Map CPU percent to a red color intensity
-   int level = cpuPercent;
+   int cpuRed = PercentToRed(cpuPercent, bright);
+   int gpuRed = PercentToRed(gpuPercent, bright);
 
-   if (level < 0)
-      level = 0;
-
-   if (level > 100)
-      level = 100;
-
-   int baseRed = 80 + (level * 175 / 100);
-   int red = bright ? baseRed : 20 + (level * 60 / 100);
-
-   HBRUSH dot = CreateSolidBrush(RGB(red, 0, 0));
-   
-   HGDIOBJ oldBrush = SelectObject(mem, dot);
-   Ellipse(mem, 10, 10, 22, 22);
-   SelectObject(mem, oldBrush);
-   DeleteObject(dot);
+   DrawRedDot(mem, 8, 8, 24, 24, cpuRed);
+   DrawRedDot(mem, 12, 12, 20, 20, gpuRed);
 
    SelectObject(mem, old);
 
@@ -241,12 +253,7 @@ void UpdateTrayIcon(HWND hwnd)
    if (trayIcon)
       DestroyIcon(trayIcon);
 
-   int dotPercent = cpuPercent;
-
-   if (gpuPercent > dotPercent)
-      dotPercent = gpuPercent;
-
-   trayIcon = CreateDotIcon(dotPercent, pulse);
+   trayIcon = CreateDotIcon(cpuPercent, gpuPercent, pulse);
 
    nid.hIcon = trayIcon;
 
@@ -288,7 +295,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
    switch (msg)
    {
    case WM_CREATE:
-      trayIcon = CreateDotIcon(0, true);
+      trayIcon = CreateDotIcon(0, 0, true);
 
       nid.cbSize = sizeof(nid);
       nid.hWnd = hwnd;

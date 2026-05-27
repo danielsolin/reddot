@@ -1,18 +1,21 @@
-#define UNICODE
-#define _UNICODE
 #include <windows.h>
 #include <shellapi.h>
 #include <wchar.h>
 #include <pdh.h>
 #include <pdhmsg.h>
-#include <stdio.h>
 
 #define WM_TRAYICON (WM_USER + 1)
 #define ID_TRAY_EXIT 1001
 #define TIMER_ID 1
+#define TOOLTIP_TIMER_ID 2
+#define TOOLTIP_PADDING_X 10
+#define TOOLTIP_PADDING_Y 7
 
 static NOTIFYICONDATA nid = {};
+static HWND mainWindow = nullptr;
 static HICON trayIcon = nullptr;
+static HWND tooltipWindow = nullptr;
+static wchar_t tooltipText[128] = L"CPU ...\nGPU ...\nRAM ...";
 static bool pulse = false;
 
 static ULONGLONG prevIdle = 0;
@@ -22,9 +25,196 @@ static int cpuPercent = -1;
 static int ramPercent = -1;
 
 static PDH_HQUERY gpuQuery = nullptr;
+static PDH_HCOUNTER cpuCounter = nullptr;
 static PDH_HCOUNTER gpuCounter = nullptr;
 static bool gpuReady = false;
 static int gpuPercent = -1;
+
+void FormatStatusText(wchar_t* buffer, size_t size)
+{
+   if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0)
+      wsprintfW(buffer, L"CPU %d%%\nGPU %d%%\nRAM %d%%",
+         cpuPercent, gpuPercent, ramPercent);
+   else if (cpuPercent >= 0 && ramPercent >= 0)
+      wsprintfW(buffer, L"CPU %d%%\nGPU ...\nRAM %d%%",
+         cpuPercent, ramPercent);
+   else
+      lstrcpynW(buffer, L"CPU ...\nGPU ...\nRAM ...", static_cast<int>(size));
+}
+
+void MeasureText(HDC hdc, const wchar_t* text, SIZE* size)
+{
+   RECT rc = { 0, 0, 1, 1 };
+
+   DrawTextW(
+      hdc,
+      text,
+      -1,
+      &rc,
+      DT_CALCRECT | DT_LEFT | DT_NOPREFIX
+   );
+
+   size->cx = rc.right - rc.left;
+   size->cy = rc.bottom - rc.top;
+}
+
+void MoveTooltipNearCursor(HWND hwnd)
+{
+   POINT pt;
+   GetCursorPos(&pt);
+
+   HDC hdc = GetDC(hwnd);
+   HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+   HGDIOBJ oldFont = SelectObject(hdc, font);
+
+   SIZE textSize = {};
+   MeasureText(hdc, tooltipText, &textSize);
+
+   SelectObject(hdc, oldFont);
+   ReleaseDC(hwnd, hdc);
+
+   int width = textSize.cx + TOOLTIP_PADDING_X * 2;
+   int height = textSize.cy + TOOLTIP_PADDING_Y * 2;
+   int x = pt.x + 14;
+   int y = pt.y - height - 8;
+
+   HMONITOR monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+   MONITORINFO mi = {};
+   mi.cbSize = sizeof(mi);
+
+   if (GetMonitorInfoW(monitor, &mi))
+   {
+      if (x + width > mi.rcWork.right)
+         x = pt.x - width - 14;
+
+      if (y < mi.rcWork.top)
+         y = pt.y + 18;
+   }
+
+   SetWindowPos(
+      hwnd,
+      HWND_TOPMOST,
+      x,
+      y,
+      width,
+      height,
+      SWP_NOACTIVATE
+   );
+}
+
+LRESULT CALLBACK TooltipProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+   switch (msg)
+   {
+      case WM_PAINT:
+      {
+         PAINTSTRUCT ps;
+         HDC hdc = BeginPaint(hwnd, &ps);
+
+         RECT rc;
+         GetClientRect(hwnd, &rc);
+
+         HBRUSH bg = CreateSolidBrush(RGB(16, 16, 16));
+         FillRect(hdc, &rc, bg);
+         DeleteObject(bg);
+
+         HPEN border = CreatePen(PS_SOLID, 1, RGB(210, 40, 40));
+         HGDIOBJ oldPen = SelectObject(hdc, border);
+         HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+         Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+         SelectObject(hdc, oldBrush);
+         SelectObject(hdc, oldPen);
+         DeleteObject(border);
+
+         HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+         HGDIOBJ oldFont = SelectObject(hdc, font);
+
+         SetBkMode(hdc, TRANSPARENT);
+         SetTextColor(hdc, RGB(245, 245, 245));
+
+         RECT textRc = {
+            TOOLTIP_PADDING_X,
+            TOOLTIP_PADDING_Y,
+            rc.right - TOOLTIP_PADDING_X,
+            rc.bottom - TOOLTIP_PADDING_Y
+         };
+
+         DrawTextW(hdc, tooltipText, -1, &textRc, DT_LEFT | DT_NOPREFIX);
+
+         SelectObject(hdc, oldFont);
+         EndPaint(hwnd, &ps);
+         return 0;
+      }
+   }
+
+   return DefWindowProc(hwnd, msg, wp, lp);
+}
+
+void ShowCustomTooltip(HWND owner)
+{
+   FormatStatusText(tooltipText, _countof(tooltipText));
+   mainWindow = owner;
+
+   if (!tooltipWindow)
+   {
+      tooltipWindow = CreateWindowExW(
+         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+         L"reddot_tooltip",
+         L"",
+         WS_POPUP,
+         0, 0, 0, 0,
+         owner,
+         nullptr,
+         GetModuleHandleW(nullptr),
+         nullptr
+      );
+   }
+
+   if (!tooltipWindow)
+      return;
+
+   MoveTooltipNearCursor(tooltipWindow);
+   ShowWindow(tooltipWindow, SW_SHOWNOACTIVATE);
+   InvalidateRect(tooltipWindow, nullptr, TRUE);
+   SetTimer(owner, TOOLTIP_TIMER_ID, 75, nullptr);
+}
+
+void HideCustomTooltip()
+{
+   if (tooltipWindow)
+      ShowWindow(tooltipWindow, SW_HIDE);
+
+   if (mainWindow)
+      KillTimer(mainWindow, TOOLTIP_TIMER_ID);
+}
+
+bool IsCursorOverTrayIcon(HWND hwnd)
+{
+   NOTIFYICONIDENTIFIER iconId = {};
+   iconId.cbSize = sizeof(iconId);
+   iconId.hWnd = hwnd;
+   iconId.uID = nid.uID;
+
+   RECT iconRect;
+
+   if (Shell_NotifyIconGetRect(&iconId, &iconRect) != S_OK)
+      return false;
+
+   InflateRect(&iconRect, 2, 2);
+
+   POINT pt;
+   GetCursorPos(&pt);
+
+   return PtInRect(&iconRect, pt);
+}
+
+void UpdateCustomTooltipVisibility(HWND hwnd)
+{
+   if (IsCursorOverTrayIcon(hwnd))
+      ShowCustomTooltip(hwnd);
+   else
+      HideCustomTooltip();
+}
 
 //Convert FILETIME to ULONGLONG for easier calculations
 ULONGLONG FileTimeToUInt64(const FILETIME& ft)
@@ -40,6 +230,28 @@ ULONGLONG FileTimeToUInt64(const FILETIME& ft)
 // the CPU has spent in different states since boot.
 int GetCpuPercent()
 {
+   if (cpuCounter)
+   {
+      PDH_FMT_COUNTERVALUE value = {};
+
+      if (PdhGetFormattedCounterValue(
+         cpuCounter,
+         PDH_FMT_DOUBLE,
+         nullptr,
+         &value) == ERROR_SUCCESS)
+      {
+         int percent = static_cast<int>(value.doubleValue + 0.5);
+
+         if (percent < 0)
+            return 0;
+
+         if (percent > 100)
+            return 100;
+
+         return percent;
+      }
+   }
+
    FILETIME idleTicksSinceBoot;
    FILETIME kernelTickSinceBoot;
    FILETIME userTicksSinceboot;
@@ -68,12 +280,13 @@ int GetCpuPercent()
    prevKernel = kernel;
    prevUser = user;
 
-   ULONGLONG total = kernelDelta + userDelta;
+   ULONGLONG kernelBusyDelta = kernelDelta - idleDelta;
+   ULONGLONG total = kernelBusyDelta + userDelta;
 
    if (total == 0)
       return 0;
 
-   int percent = static_cast<int>((total - idleDelta) * 100 / total);
+   int percent = static_cast<int>(total * 100 / (total + idleDelta));
 
    if (percent < 0)
       return 0;
@@ -95,11 +308,16 @@ int GetRamPercent()
    return static_cast<int>(memory.dwMemoryLoad);
 }
 
-
 bool InitGpuCounter()
 {
    if (PdhOpenQuery(nullptr, 0, &gpuQuery) != ERROR_SUCCESS)
       return false;
+
+   PdhAddEnglishCounterW(
+      gpuQuery,
+      L"\\Processor Information(_Total)\\% Processor Utility",
+      0,
+      &cpuCounter);
 
    if (PdhAddEnglishCounterW(
       gpuQuery,
@@ -109,6 +327,7 @@ bool InitGpuCounter()
    {
       PdhCloseQuery(gpuQuery);
       gpuQuery = nullptr;
+      cpuCounter = nullptr;
       gpuCounter = nullptr;
       return false;
    }
@@ -130,9 +349,6 @@ int GetGpuPercent()
    if (!gpuQuery || !gpuCounter)
       return -1;
 
-   if (PdhCollectQueryData(gpuQuery) != ERROR_SUCCESS)
-      return -1;
-
    DWORD bufferSize = 0;
    DWORD itemCount = 0;
 
@@ -147,7 +363,8 @@ int GetGpuPercent()
    if (status != PDH_MORE_DATA)
       return -1;
 
-   auto items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(malloc(bufferSize));
+   auto items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(
+      HeapAlloc(GetProcessHeap(), 0, bufferSize));
 
    if (!items)
       return -1;
@@ -162,7 +379,7 @@ int GetGpuPercent()
 
    if (status != ERROR_SUCCESS)
    {
-      free(items);
+      HeapFree(GetProcessHeap(), 0, items);
       return -1;
    }
 
@@ -176,7 +393,7 @@ int GetGpuPercent()
          maxValue = value;
    }
 
-   free(items);
+   HeapFree(GetProcessHeap(), 0, items);
 
    if (maxValue < 0.0)
       maxValue = 0.0;
@@ -194,6 +411,7 @@ void CleanupGpuCounter()
    {
       PdhCloseQuery(gpuQuery);
       gpuQuery = nullptr;
+      cpuCounter = nullptr;
       gpuCounter = nullptr;
    }
 }
@@ -227,7 +445,7 @@ void DrawRedDot(HDC hdc, int left, int top, int right, int bottom, int red)
 }
 
 // Create an icon with red dots representing CPU and GPU usage percentages.
-HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
+HICON CreateDotIcon(int cpuUsage, int gpuUsage, bool bright)
 {
    const int size = 32;
 
@@ -244,8 +462,8 @@ HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
    FillRect(mem, &rc, bg);
    DeleteObject(bg);
 
-   int cpuRed = PercentToRed(cpuPercent, bright);
-   int gpuRed = PercentToRed(gpuPercent, bright);
+   int cpuRed = PercentToRed(cpuUsage, bright);
+   int gpuRed = PercentToRed(gpuUsage, bright);
 
    DrawRedDot(mem, 3, 3, 29, 29, cpuRed);
    DrawRedDot(mem, 9, 9, 23, 23, gpuRed);
@@ -269,7 +487,7 @@ HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
 
 // Update the tray icon and tooltip with the current CPU and GPU
 // usage percentages.
-void UpdateTrayIcon(HWND hwnd)
+void UpdateTrayIcon()
 {
    if (trayIcon)
       DestroyIcon(trayIcon);
@@ -277,15 +495,8 @@ void UpdateTrayIcon(HWND hwnd)
    trayIcon = CreateDotIcon(cpuPercent, gpuPercent, pulse);
 
    nid.hIcon = trayIcon;
-
-   if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0)
-      swprintf_s(nid.szTip, L"CPU %d%%\nGPU %d%%\nRAM %d%%",
-         cpuPercent, gpuPercent, ramPercent);
-   else if (cpuPercent >= 0 && ramPercent >= 0)
-      swprintf_s(nid.szTip, L"CPU %d%%\nGPU ...\nRAM %d%% ",
-         cpuPercent, ramPercent);
-   else
-      wcscpy_s(nid.szTip, L"CPU ...\nGPU ...\nRAM ...");
+   FormatStatusText(tooltipText, _countof(tooltipText));
+   lstrcpynW(nid.szTip, tooltipText, _countof(nid.szTip));
 
    Shell_NotifyIcon(NIM_MODIFY, &nid);
 }
@@ -320,15 +531,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
    switch (msg)
    {
       case WM_CREATE:
+         mainWindow = hwnd;
          trayIcon = CreateDotIcon(0, 0, true);
 
          nid.cbSize = sizeof(nid);
          nid.hWnd = hwnd;
          nid.uID = 1;
-         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+         nid.uFlags = NIF_MESSAGE | NIF_ICON;
          nid.uCallbackMessage = WM_TRAYICON;
          nid.hIcon = trayIcon;
-         wcscpy_s(nid.szTip, L"CPU ...");
+         FormatStatusText(tooltipText, _countof(tooltipText));
+         lstrcpynW(nid.szTip, tooltipText, _countof(nid.szTip));
 
          Shell_NotifyIcon(NIM_ADD, &nid);
          SetTimer(hwnd, TIMER_ID, 1000, nullptr);
@@ -337,6 +550,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          return 0;
 
       case WM_TIMER:
+         if (wp == TOOLTIP_TIMER_ID)
+         {
+            UpdateCustomTooltipVisibility(hwnd);
+            return 0;
+         }
+
+         if (gpuReady)
+            PdhCollectQueryData(gpuQuery);
+
          cpuPercent = GetCpuPercent();
          ramPercent = GetRamPercent();
 
@@ -344,12 +566,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             gpuPercent = GetGpuPercent();
 
          pulse = !pulse;
-         UpdateTrayIcon(hwnd);
+         UpdateTrayIcon();
+         UpdateCustomTooltipVisibility(hwnd);
+
          return 0;
 
       case WM_TRAYICON:
-         if (lp == WM_RBUTTONUP)
+         if (lp == WM_MOUSEMOVE)
+            UpdateCustomTooltipVisibility(hwnd);
+         else if (lp == WM_MOUSELEAVE)
+            HideCustomTooltip();
+         else if (lp == WM_RBUTTONUP)
+         {
+            HideCustomTooltip();
             ShowTrayMenu(hwnd);
+         }
          return 0;
 
       case WM_COMMAND:
@@ -364,6 +595,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          if (trayIcon)
             DestroyIcon(trayIcon);
 
+         if (tooltipWindow)
+            DestroyWindow(tooltipWindow);
+
          CleanupGpuCounter();
          PostQuitMessage(0);
          return 0;
@@ -377,6 +611,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
    const wchar_t CLASS_NAME[] = L"reddot_window";
+   const wchar_t TOOLTIP_CLASS_NAME[] = L"reddot_tooltip";
 
    WNDCLASS wc = {};
    wc.lpfnWndProc = WndProc;
@@ -385,7 +620,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 
    RegisterClass(&wc);
 
-   HWND hwnd = CreateWindowEx(
+   WNDCLASS tooltipClass = {};
+   tooltipClass.lpfnWndProc = TooltipProc;
+   tooltipClass.hInstance = instance;
+   tooltipClass.lpszClassName = TOOLTIP_CLASS_NAME;
+   tooltipClass.hCursor = LoadCursor(nullptr, IDC_ARROW);
+
+   RegisterClass(&tooltipClass);
+
+   CreateWindowEx(
       0,
       CLASS_NAME,
       L"red dot",

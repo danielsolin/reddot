@@ -258,9 +258,11 @@ void UpdateTrayIcon(HWND hwnd)
    nid.hIcon = trayIcon;
 
    if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0)
-      swprintf_s(nid.szTip, L"CPU %d%%\nGPU %d%%\nRAM %d%%", cpuPercent, gpuPercent, ramPercent);
+      swprintf_s(nid.szTip, L"CPU %d%%\nGPU %d%%\nRAM %d%%",
+         cpuPercent, gpuPercent, ramPercent);
    else if (cpuPercent >= 0 && ramPercent >= 0)
-      swprintf_s(nid.szTip, L"CPU %d%%\nGPU ...\nRAM %d%% ", cpuPercent, ramPercent);
+      swprintf_s(nid.szTip, L"CPU %d%%\nGPU ...\nRAM %d%% ",
+         cpuPercent, ramPercent);
    else
       wcscpy_s(nid.szTip, L"CPU ...\nGPU ...\nRAM ...");
 
@@ -294,54 +296,54 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
    switch (msg)
    {
-   case WM_CREATE:
-      trayIcon = CreateDotIcon(0, 0, true);
+      case WM_CREATE:
+         trayIcon = CreateDotIcon(0, 0, true);
 
-      nid.cbSize = sizeof(nid);
-      nid.hWnd = hwnd;
-      nid.uID = 1;
-      nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-      nid.uCallbackMessage = WM_TRAYICON;
-      nid.hIcon = trayIcon;
-      wcscpy_s(nid.szTip, L"CPU ...");
+         nid.cbSize = sizeof(nid);
+         nid.hWnd = hwnd;
+         nid.uID = 1;
+         nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+         nid.uCallbackMessage = WM_TRAYICON;
+         nid.hIcon = trayIcon;
+         wcscpy_s(nid.szTip, L"CPU ...");
 
-      Shell_NotifyIcon(NIM_ADD, &nid);
-      SetTimer(hwnd, TIMER_ID, 1000, nullptr);
-      gpuReady = InitGpuCounter();
+         Shell_NotifyIcon(NIM_ADD, &nid);
+         SetTimer(hwnd, TIMER_ID, 1000, nullptr);
+         gpuReady = InitGpuCounter();
 
-      return 0;
+         return 0;
 
-   case WM_TIMER:
-      cpuPercent = GetCpuPercent();
-      ramPercent = GetRamPercent();
+      case WM_TIMER:
+         cpuPercent = GetCpuPercent();
+         ramPercent = GetRamPercent();
 
-      if (gpuReady)
-         gpuPercent = GetGpuPercent();
+         if (gpuReady)
+            gpuPercent = GetGpuPercent();
 
-      pulse = !pulse;
-      UpdateTrayIcon(hwnd);
-      return 0;
+         pulse = !pulse;
+         UpdateTrayIcon(hwnd);
+         return 0;
 
-   case WM_TRAYICON:
-      if (lp == WM_RBUTTONUP)
-         ShowTrayMenu(hwnd);
-      return 0;
+      case WM_TRAYICON:
+         if (lp == WM_RBUTTONUP)
+            ShowTrayMenu(hwnd);
+         return 0;
 
-   case WM_COMMAND:
-      if (LOWORD(wp) == ID_TRAY_EXIT)
-         DestroyWindow(hwnd);
-      return 0;
+      case WM_COMMAND:
+         if (LOWORD(wp) == ID_TRAY_EXIT)
+            DestroyWindow(hwnd);
+         return 0;
 
-   case WM_DESTROY:
-      KillTimer(hwnd, TIMER_ID);
-      Shell_NotifyIcon(NIM_DELETE, &nid);
+      case WM_DESTROY:
+         KillTimer(hwnd, TIMER_ID);
+         Shell_NotifyIcon(NIM_DELETE, &nid);
 
-      if (trayIcon)
-         DestroyIcon(trayIcon);
+         if (trayIcon)
+            DestroyIcon(trayIcon);
 
-      CleanupGpuCounter();
-      PostQuitMessage(0);
-      return 0;
+         CleanupGpuCounter();
+         PostQuitMessage(0);
+         return 0;
    }
 
    return DefWindowProc(hwnd, msg, wp, lp);

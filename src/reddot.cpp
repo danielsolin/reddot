@@ -26,6 +26,7 @@ static PDH_HCOUNTER gpuCounter = nullptr;
 static bool gpuReady = false;
 static int gpuPercent = -1;
 
+//Convert FILETIME to ULONGLONG for easier calculations
 ULONGLONG FileTimeToUInt64(const FILETIME& ft)
 {
    ULARGE_INTEGER uli;
@@ -34,18 +35,22 @@ ULONGLONG FileTimeToUInt64(const FILETIME& ft)
    return uli.QuadPart;
 }
 
+// Get CPU usage percentage since the last call
+// "Time" is not real time, but the amount of time
+// the CPU has spent in different states since boot.
 int GetCpuPercent()
 {
-   FILETIME idleTime;
-   FILETIME kernelTime;
-   FILETIME userTime;
+   FILETIME idleTicksSinceBoot;
+   FILETIME kernelTickSinceBoot;
+   FILETIME userTicksSinceboot;
 
-   if (!GetSystemTimes(&idleTime, &kernelTime, &userTime))
+   if (!GetSystemTimes(
+      &idleTicksSinceBoot, &kernelTickSinceBoot, &userTicksSinceboot))
       return -1;
 
-   ULONGLONG idle = FileTimeToUInt64(idleTime);
-   ULONGLONG kernel = FileTimeToUInt64(kernelTime);
-   ULONGLONG user = FileTimeToUInt64(userTime);
+   ULONGLONG idle = FileTimeToUInt64(idleTicksSinceBoot);
+   ULONGLONG kernel = FileTimeToUInt64(kernelTickSinceBoot);
+   ULONGLONG user = FileTimeToUInt64(userTicksSinceboot);
 
    if (prevIdle == 0 && prevKernel == 0 && prevUser == 0)
    {
@@ -90,6 +95,7 @@ int GetRamPercent()
    return static_cast<int>(memory.dwMemoryLoad);
 }
 
+
 bool InitGpuCounter()
 {
    if (PdhOpenQuery(nullptr, 0, &gpuQuery) != ERROR_SUCCESS)
@@ -111,6 +117,14 @@ bool InitGpuCounter()
    return true;
 }
 
+// Get GPU usage percentage by querying the PDH counter for GPU utilization.
+// Measures all GPU engines and returns the maximum utilization among them,
+// which is a common way to estimate overall GPU usage. The counter used is
+// "\\GPU Engine(*)\\Utilization Percentage", which provides the percentage
+// of time the GPU engine is busy. The function collects the data, retrieves
+// the formatted counter values for all instances, and calculates the maximum
+// utilization percentage. If any step fails, it returns -1 to indicate an
+// error.
 int GetGpuPercent()
 {
    if (!gpuQuery || !gpuCounter)
@@ -173,6 +187,7 @@ int GetGpuPercent()
    return static_cast<int>(maxValue + 0.5);
 }
 
+// Clean up the GPU counter resources by closing the PDH query.
 void CleanupGpuCounter()
 {
    if (gpuQuery)
@@ -183,6 +198,7 @@ void CleanupGpuCounter()
    }
 }
 
+// Convert a percentage value (0-100) to a red color intensity for the icon.
 int PercentToRed(int percent, bool bright)
 {
    int level = percent;
@@ -197,6 +213,8 @@ int PercentToRed(int percent, bool bright)
    return bright ? baseRed : 20 + (level * 60 / 100);
 }
 
+// Draw a red dot on the provided device context (HDC) within the specified
+// rectangle.
 void DrawRedDot(HDC hdc, int left, int top, int right, int bottom, int red)
 {
    HBRUSH brush = CreateSolidBrush(RGB(red, 0, 0));
@@ -208,6 +226,7 @@ void DrawRedDot(HDC hdc, int left, int top, int right, int bottom, int red)
    DeleteObject(brush);
 }
 
+// Create an icon with red dots representing CPU and GPU usage percentages.
 HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
 {
    const int size = 32;
@@ -248,6 +267,8 @@ HICON CreateDotIcon(int cpuPercent, int gpuPercent, bool bright)
    return icon;
 }
 
+// Update the tray icon and tooltip with the current CPU and GPU
+// usage percentages.
 void UpdateTrayIcon(HWND hwnd)
 {
    if (trayIcon)
@@ -292,6 +313,8 @@ void ShowTrayMenu(HWND hwnd)
    DestroyMenu(menu);
 }
 
+// Window procedure to handle messages for the hidden window that
+// manages the tray icon and system resource monitoring.
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
    switch (msg)
@@ -349,6 +372,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
    return DefWindowProc(hwnd, msg, wp, lp);
 }
 
+// Entry point for the application, which creates a hidden window
+// to manage the tray icon and starts the message loop.
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
    const wchar_t CLASS_NAME[] = L"reddot_window";

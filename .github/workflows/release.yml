@@ -1,0 +1,56 @@
+name: Build release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build Release
+        run: msbuild reddot.sln /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /m /v:minimal
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist/reddot | Out-Null
+          Copy-Item x64/Release/reddot.exe dist/reddot/
+          Copy-Item README.md dist/reddot/
+          Copy-Item LICENSE dist/reddot/
+          Compress-Archive -Path dist/reddot/* -DestinationPath dist/reddot-windows-x64.zip -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reddot-windows-x64
+          path: dist/reddot-windows-x64.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag dist/reddot-windows-x64.zip --title $tag --notes "Windows x64 release."
+          } else {
+            gh release upload $tag dist/reddot-windows-x64.zip --clobber
+          }

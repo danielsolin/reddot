@@ -1,7 +1,7 @@
 # reddot
 
 `reddot` is a tiny Windows tray monitor. It has no main window and communicates
-through a single red dot in the notification area.
+through a flashing red dot in the notification area.
 
 The outer dot shows CPU activity. The inner dot shows GPU activity. Brighter red
 means more activity.
@@ -14,15 +14,9 @@ means more activity.
 | ![Busy red dot](docs/images/reddot-busy.png) | CPU and GPU activity are both high. |
 
 Hover the tray icon to show the popup:
-
-```text
-CPU 12%
-GPU 34%
-RAM 56%
-HDD 7%
-NET 2%
-```
-
+  
+![popup](docs/images/popup.png)  
+  
 `HDD` is the busiest physical disk. `NET` is the busiest network interface
 relative to its reported link speed.
 

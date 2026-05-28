@@ -30,7 +30,6 @@ static PDH_HQUERY gpuQuery = nullptr;
 static PDH_HCOUNTER cpuCounter = nullptr;
 static PDH_HCOUNTER diskCounter = nullptr;
 static PDH_HCOUNTER netBytesCounter = nullptr;
-static PDH_HCOUNTER netBandwidthCounter = nullptr;
 static PDH_HCOUNTER gpuCounter = nullptr;
 static bool gpuReady = false;
 static int gpuPercent = -1;
@@ -416,112 +415,85 @@ bool IsNetworkInstanceIgnored(const wchar_t* name)
 
 int GetNetworkPercent()
 {
-   if (!netBytesCounter || !netBandwidthCounter)
+   if (!netBytesCounter)
       return -1;
 
-   DWORD bytesBufferSize = 0;
-   DWORD bytesItemCount = 0;
-   DWORD bandwidthBufferSize = 0;
-   DWORD bandwidthItemCount = 0;
+   DWORD bufferSize = 0;
+   DWORD itemCount = 0;
 
-   PDH_STATUS bytesStatus = PdhGetFormattedCounterArrayW(
+   PDH_STATUS status = PdhGetFormattedCounterArrayW(
       netBytesCounter,
       PDH_FMT_DOUBLE,
-      &bytesBufferSize,
-      &bytesItemCount,
+      &bufferSize,
+      &itemCount,
       nullptr
    );
 
-   PDH_STATUS bandwidthStatus = PdhGetFormattedCounterArrayW(
-      netBandwidthCounter,
-      PDH_FMT_DOUBLE,
-      &bandwidthBufferSize,
-      &bandwidthItemCount,
-      nullptr
-   );
-
-   if (bytesStatus != PDH_MORE_DATA || bandwidthStatus != PDH_MORE_DATA)
+   if (status != PDH_MORE_DATA)
       return -1;
 
-   auto bytesItems = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(
-      HeapAlloc(GetProcessHeap(), 0, bytesBufferSize));
-   auto bandwidthItems = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(
-      HeapAlloc(GetProcessHeap(), 0, bandwidthBufferSize));
+   auto items = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(
+      HeapAlloc(GetProcessHeap(), 0, bufferSize));
 
-   if (!bytesItems || !bandwidthItems)
-   {
-      if (bytesItems)
-         HeapFree(GetProcessHeap(), 0, bytesItems);
-
-      if (bandwidthItems)
-         HeapFree(GetProcessHeap(), 0, bandwidthItems);
-
+   if (!items)
       return -1;
-   }
 
-   bytesStatus = PdhGetFormattedCounterArrayW(
+   status = PdhGetFormattedCounterArrayW(
       netBytesCounter,
       PDH_FMT_DOUBLE,
-      &bytesBufferSize,
-      &bytesItemCount,
-      bytesItems
+      &bufferSize,
+      &itemCount,
+      items
    );
 
-   bandwidthStatus = PdhGetFormattedCounterArrayW(
-      netBandwidthCounter,
-      PDH_FMT_DOUBLE,
-      &bandwidthBufferSize,
-      &bandwidthItemCount,
-      bandwidthItems
-   );
-
-   if (bytesStatus != ERROR_SUCCESS || bandwidthStatus != ERROR_SUCCESS)
+   if (status != ERROR_SUCCESS)
    {
-      HeapFree(GetProcessHeap(), 0, bytesItems);
-      HeapFree(GetProcessHeap(), 0, bandwidthItems);
+      HeapFree(GetProcessHeap(), 0, items);
       return -1;
    }
 
-   double maxValue = 0.0;
+   double maxBytesPerSecond = 0.0;
 
-   for (DWORD i = 0; i < bytesItemCount; i++)
+   for (DWORD i = 0; i < itemCount; i++)
    {
-      const wchar_t* name = bytesItems[i].szName;
+      const wchar_t* name = items[i].szName;
 
       if (IsNetworkInstanceIgnored(name))
          continue;
 
-      double bandwidth = 0.0;
+      double value = items[i].FmtValue.doubleValue;
 
-      for (DWORD j = 0; j < bandwidthItemCount; j++)
-      {
-         if (bandwidthItems[j].szName &&
-            lstrcmpW(name, bandwidthItems[j].szName) == 0)
-         {
-            bandwidth = bandwidthItems[j].FmtValue.doubleValue;
-            break;
-         }
-      }
-
-      if (bandwidth <= 0.0)
-         continue;
-
-      double value = bytesItems[i].FmtValue.doubleValue * 8.0 * 100.0 / bandwidth;
-
-      if (value > maxValue)
-         maxValue = value;
+      if (value > maxBytesPerSecond)
+         maxBytesPerSecond = value;
    }
 
-   HeapFree(GetProcessHeap(), 0, bytesItems);
-   HeapFree(GetProcessHeap(), 0, bandwidthItems);
+   HeapFree(GetProcessHeap(), 0, items);
 
-   if (maxValue < 0.0)
-      maxValue = 0.0;
+   if (maxBytesPerSecond <= 0.0)
+      return 0;
 
-   if (maxValue > 100.0)
-      maxValue = 100.0;
+   const double kb = 1024.0;
+   const double mb = kb * 1024.0;
+   double percent = 0.0;
 
-   return static_cast<int>(maxValue + 0.5);
+   if (maxBytesPerSecond < 100.0 * kb)
+      percent = maxBytesPerSecond * 20.0 / (100.0 * kb);
+   else if (maxBytesPerSecond < 1.0 * mb)
+      percent = 20.0 + ((maxBytesPerSecond - 100.0 * kb) * 30.0 / (924.0 * kb));
+   else if (maxBytesPerSecond < 10.0 * mb)
+      percent = 50.0 + ((maxBytesPerSecond - 1.0 * mb) * 30.0 / (9.0 * mb));
+   else if (maxBytesPerSecond < 100.0 * mb)
+      percent = 80.0 + ((maxBytesPerSecond - 10.0 * mb) * 20.0 / (90.0 * mb));
+   else
+      percent = 100.0;
+
+   if (percent < 0.0)
+      return 0;
+
+   if (percent > 100.0)
+      return 100;
+
+   return static_cast<int>(percent + 0.5);
 }
 
 bool InitGpuCounter()
@@ -547,12 +519,6 @@ bool InitGpuCounter()
       0,
       &netBytesCounter);
 
-   PdhAddEnglishCounterW(
-      gpuQuery,
-      L"\\Network Interface(*)\\Current Bandwidth",
-      0,
-      &netBandwidthCounter);
-
    if (PdhAddEnglishCounterW(
       gpuQuery,
       L"\\GPU Engine(*)\\Utilization Percentage",
@@ -564,7 +530,6 @@ bool InitGpuCounter()
       cpuCounter = nullptr;
       diskCounter = nullptr;
       netBytesCounter = nullptr;
-      netBandwidthCounter = nullptr;
       gpuCounter = nullptr;
       return false;
    }
@@ -651,7 +616,6 @@ void CleanupGpuCounter()
       cpuCounter = nullptr;
       diskCounter = nullptr;
       netBytesCounter = nullptr;
-      netBandwidthCounter = nullptr;
       gpuCounter = nullptr;
    }
 }

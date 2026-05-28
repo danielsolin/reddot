@@ -15,7 +15,7 @@ static NOTIFYICONDATA nid = {};
 static HWND mainWindow = nullptr;
 static HICON trayIcon = nullptr;
 static HWND tooltipWindow = nullptr;
-static wchar_t tooltipText[160] = L"CPU ...\nGPU ...\nRAM ...\nHDD ...";
+static wchar_t tooltipText[200] = L"CPU ...\nGPU ...\nRAM ...\nHDD ...\nNET ...";
 static bool pulse = false;
 
 static ULONGLONG prevIdle = 0;
@@ -24,30 +24,54 @@ static ULONGLONG prevUser = 0;
 static int cpuPercent = -1;
 static int ramPercent = -1;
 static int diskPercent = -1;
+static int netPercent = -1;
 
 static PDH_HQUERY gpuQuery = nullptr;
 static PDH_HCOUNTER cpuCounter = nullptr;
 static PDH_HCOUNTER diskCounter = nullptr;
+static PDH_HCOUNTER netBytesCounter = nullptr;
+static PDH_HCOUNTER netBandwidthCounter = nullptr;
 static PDH_HCOUNTER gpuCounter = nullptr;
 static bool gpuReady = false;
 static int gpuPercent = -1;
 
 void FormatStatusText(wchar_t* buffer, size_t size)
 {
-   if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0 && diskPercent >= 0)
-      wsprintfW(buffer, L"CPU %d%%\nGPU %d%%\nRAM %d%%\nHDD %d%%",
-         cpuPercent, gpuPercent, ramPercent, diskPercent);
-   else if (cpuPercent >= 0 && ramPercent >= 0 && gpuPercent >= 0)
-      wsprintfW(buffer, L"CPU %d%%\nGPU %d%%\nRAM %d%%\nHDD ...",
-         cpuPercent, gpuPercent, ramPercent);
-   else if (cpuPercent >= 0 && ramPercent >= 0 && diskPercent >= 0)
-      wsprintfW(buffer, L"CPU %d%%\nGPU ...\nRAM %d%%\nHDD %d%%",
-         cpuPercent, ramPercent, diskPercent);
-   else if (cpuPercent >= 0 && ramPercent >= 0)
-      wsprintfW(buffer, L"CPU %d%%\nGPU ...\nRAM %d%%\nHDD ...",
-         cpuPercent, ramPercent);
+   (void)size;
+
+   wchar_t cpu[16];
+   wchar_t gpu[16];
+   wchar_t ram[16];
+   wchar_t disk[16];
+   wchar_t net[16];
+
+   if (cpuPercent >= 0)
+      wsprintfW(cpu, L"%d%%", cpuPercent);
    else
-      lstrcpynW(buffer, L"CPU ...\nGPU ...\nRAM ...\nHDD ...", static_cast<int>(size));
+      lstrcpynW(cpu, L"...", _countof(cpu));
+
+   if (gpuPercent >= 0)
+      wsprintfW(gpu, L"%d%%", gpuPercent);
+   else
+      lstrcpynW(gpu, L"...", _countof(gpu));
+
+   if (ramPercent >= 0)
+      wsprintfW(ram, L"%d%%", ramPercent);
+   else
+      lstrcpynW(ram, L"...", _countof(ram));
+
+   if (diskPercent >= 0)
+      wsprintfW(disk, L"%d%%", diskPercent);
+   else
+      lstrcpynW(disk, L"...", _countof(disk));
+
+   if (netPercent >= 0)
+      wsprintfW(net, L"%d%%", netPercent);
+   else
+      lstrcpynW(net, L"...", _countof(net));
+
+   wsprintfW(buffer, L"CPU %s\nGPU %s\nRAM %s\nHDD %s\nNET %s",
+      cpu, gpu, ram, disk, net);
 }
 
 void MeasureText(HDC hdc, const wchar_t* text, SIZE* size)
@@ -379,6 +403,127 @@ int GetDiskPercent()
    return static_cast<int>(maxValue + 0.5);
 }
 
+bool IsNetworkInstanceIgnored(const wchar_t* name)
+{
+   if (!name)
+      return true;
+
+   if (lstrcmpW(name, L"_Total") == 0)
+      return true;
+
+   return wcsstr(name, L"Loopback") != nullptr;
+}
+
+int GetNetworkPercent()
+{
+   if (!netBytesCounter || !netBandwidthCounter)
+      return -1;
+
+   DWORD bytesBufferSize = 0;
+   DWORD bytesItemCount = 0;
+   DWORD bandwidthBufferSize = 0;
+   DWORD bandwidthItemCount = 0;
+
+   PDH_STATUS bytesStatus = PdhGetFormattedCounterArrayW(
+      netBytesCounter,
+      PDH_FMT_DOUBLE,
+      &bytesBufferSize,
+      &bytesItemCount,
+      nullptr
+   );
+
+   PDH_STATUS bandwidthStatus = PdhGetFormattedCounterArrayW(
+      netBandwidthCounter,
+      PDH_FMT_DOUBLE,
+      &bandwidthBufferSize,
+      &bandwidthItemCount,
+      nullptr
+   );
+
+   if (bytesStatus != PDH_MORE_DATA || bandwidthStatus != PDH_MORE_DATA)
+      return -1;
+
+   auto bytesItems = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(
+      HeapAlloc(GetProcessHeap(), 0, bytesBufferSize));
+   auto bandwidthItems = static_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(
+      HeapAlloc(GetProcessHeap(), 0, bandwidthBufferSize));
+
+   if (!bytesItems || !bandwidthItems)
+   {
+      if (bytesItems)
+         HeapFree(GetProcessHeap(), 0, bytesItems);
+
+      if (bandwidthItems)
+         HeapFree(GetProcessHeap(), 0, bandwidthItems);
+
+      return -1;
+   }
+
+   bytesStatus = PdhGetFormattedCounterArrayW(
+      netBytesCounter,
+      PDH_FMT_DOUBLE,
+      &bytesBufferSize,
+      &bytesItemCount,
+      bytesItems
+   );
+
+   bandwidthStatus = PdhGetFormattedCounterArrayW(
+      netBandwidthCounter,
+      PDH_FMT_DOUBLE,
+      &bandwidthBufferSize,
+      &bandwidthItemCount,
+      bandwidthItems
+   );
+
+   if (bytesStatus != ERROR_SUCCESS || bandwidthStatus != ERROR_SUCCESS)
+   {
+      HeapFree(GetProcessHeap(), 0, bytesItems);
+      HeapFree(GetProcessHeap(), 0, bandwidthItems);
+      return -1;
+   }
+
+   double maxValue = 0.0;
+
+   for (DWORD i = 0; i < bytesItemCount; i++)
+   {
+      const wchar_t* name = bytesItems[i].szName;
+
+      if (IsNetworkInstanceIgnored(name))
+         continue;
+
+      double bandwidth = 0.0;
+
+      for (DWORD j = 0; j < bandwidthItemCount; j++)
+      {
+         if (bandwidthItems[j].szName &&
+            lstrcmpW(name, bandwidthItems[j].szName) == 0)
+         {
+            bandwidth = bandwidthItems[j].FmtValue.doubleValue;
+            break;
+         }
+      }
+
+      if (bandwidth <= 0.0)
+         continue;
+
+      double value = bytesItems[i].FmtValue.doubleValue * 8.0 * 100.0 / bandwidth;
+
+      if (value > maxValue)
+         maxValue = value;
+   }
+
+   HeapFree(GetProcessHeap(), 0, bytesItems);
+   HeapFree(GetProcessHeap(), 0, bandwidthItems);
+
+   if (maxValue < 0.0)
+      maxValue = 0.0;
+
+   if (maxValue > 100.0)
+      maxValue = 100.0;
+
+   return static_cast<int>(maxValue + 0.5);
+}
+
 bool InitGpuCounter()
 {
    if (PdhOpenQuery(nullptr, 0, &gpuQuery) != ERROR_SUCCESS)
@@ -396,6 +541,18 @@ bool InitGpuCounter()
       0,
       &diskCounter);
 
+   PdhAddEnglishCounterW(
+      gpuQuery,
+      L"\\Network Interface(*)\\Bytes Total/sec",
+      0,
+      &netBytesCounter);
+
+   PdhAddEnglishCounterW(
+      gpuQuery,
+      L"\\Network Interface(*)\\Current Bandwidth",
+      0,
+      &netBandwidthCounter);
+
    if (PdhAddEnglishCounterW(
       gpuQuery,
       L"\\GPU Engine(*)\\Utilization Percentage",
@@ -406,6 +563,8 @@ bool InitGpuCounter()
       gpuQuery = nullptr;
       cpuCounter = nullptr;
       diskCounter = nullptr;
+      netBytesCounter = nullptr;
+      netBandwidthCounter = nullptr;
       gpuCounter = nullptr;
       return false;
    }
@@ -491,6 +650,8 @@ void CleanupGpuCounter()
       gpuQuery = nullptr;
       cpuCounter = nullptr;
       diskCounter = nullptr;
+      netBytesCounter = nullptr;
+      netBandwidthCounter = nullptr;
       gpuCounter = nullptr;
    }
 }
@@ -641,6 +802,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          cpuPercent = GetCpuPercent();
          ramPercent = GetRamPercent();
          diskPercent = GetDiskPercent();
+         netPercent = GetNetworkPercent();
 
          if (gpuReady)
             gpuPercent = GetGpuPercent();
